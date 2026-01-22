@@ -60,7 +60,7 @@ jobs:
         if: success()
         with:
           issue: FNC-3
-          transition: "Ready for Review"
+          transition: "automatique via webhook GitHub Actions"
 
       # 9️⃣ Ajouter un commentaire automatique sur le ticket Jira
       - name: Comment on Jira
