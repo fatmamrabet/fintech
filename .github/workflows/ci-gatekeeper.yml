@@ -1,6 +1,5 @@
 name: CI Gatekeeper
 
-# Déclenche le workflow sur toute Pull Request vers develop ou main
 on:
   pull_request:
     branches:
@@ -12,40 +11,44 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1️⃣ Récupère le code du repo pour pouvoir tester
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # 2️⃣ Vérifie que la branche ou le titre du PR contient un ticket Jira FNC-XXX
-      - name: Check Jira ticket
+      # 1) Vérifie qu'on a une clé Jira dans la branche ou le titre
+      - name: Check Jira ticket + Extract key
+        id: jirakey
         run: |
           echo "Branch: ${{ github.head_ref }}"
           echo "PR title: ${{ github.event.pull_request.title }}"
-          # Vérifie FNC-3 ou tout ticket FNC-[num]
-          if [[ ! "${{ github.head_ref }}" =~ FNC-[0-9]+ ]] && [[ ! "${{ github.event.pull_request.title }}" =~ FNC-[0-9]+ ]]; then
-            echo "❌ No Jira ticket found"
+
+          text="${{ github.head_ref }} ${{ github.event.pull_request.title }}"
+
+          # extrait FNC-123 (adapte si un autre projet Jira)
+          issue=$(echo "$text" | grep -oE 'FNC-[0-9]+' | head -n 1)
+
+          if [ -z "$issue" ]; then
+            echo "❌ No Jira ticket found in branch name or PR title"
             exit 1
           fi
 
-      # 3️⃣ Installer Python pour lint et tests
+          echo "✅ Jira issue detected: $issue"
+          echo "issue=$issue" >> $GITHUB_OUTPUT
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      # 4️⃣ Installer dépendances Python (pytest et flake8)
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # 5️⃣ Linter pour vérifier la qualité du code
       - name: Run linter
         run: flake8 .
 
-      # 6️⃣ Exécuter les tests unitaires
       - name: Run tests
         run: pytest
 
-      # 7️⃣ Se connecter à Jira (secrets sécurisés)
+      # 2) Login Jira
       - name: Login to Jira
         uses: atlassian/gajira-login@v3
         if: success()
@@ -53,29 +56,47 @@ jobs:
           JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
           JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
-      - name: Debug Jira transitions (FNC-3)
+
+      # 3) Lire le statut actuel pour éviter de casser si déjà Ready for Review
+      - name: Get Jira status
+        id: jirastatus
+        if: success()
         run: |
-          echo "=== Calling Jira transitions API ==="
-          echo "Base URL: ${{ secrets.JIRA_BASE_URL }}"
-          echo "User: ${{ secrets.JIRA_USER_EMAIL }}"
+          ISSUE="${{ steps.jirakey.outputs.issue }}"
+
+          status=$(curl -sS -u "${{ secrets.JIRA_USER_EMAIL }}:${{ secrets.JIRA_API_TOKEN }}" \
+            -H "Accept: application/json" \
+            "${{ secrets.JIRA_BASE_URL }}/rest/api/3/issue/${ISSUE}?fields=status" \
+            | python -c "import sys,json; print(json.load(sys.stdin)['fields']['status']['name'])")
+
+          echo "Current Jira status: $status"
+          echo "status=$status" >> $GITHUB_OUTPUT
+
+      # 4) Debug transitions (optionnel, tu peux supprimer après)
+      - name: Debug Jira transitions
+        if: success()
+        run: |
+          ISSUE="${{ steps.jirakey.outputs.issue }}"
+          echo "=== Calling Jira transitions API for $ISSUE ==="
 
           curl -sS --request GET \
-            --url "${{ secrets.JIRA_BASE_URL }}/rest/api/3/issue/FNC-3/transitions" \
+            --url "${{ secrets.JIRA_BASE_URL }}/rest/api/3/issue/${ISSUE}/transitions" \
             --user "${{ secrets.JIRA_USER_EMAIL }}:${{ secrets.JIRA_API_TOKEN }}" \
             --header "Accept: application/json" | head -c 4000
 
-      # 8️⃣ Déplacer automatiquement le ticket Jira vers Ready for Review si CI réussit
+      # 5) Transition vers Ready for Review (ID=3 chez toi)
+      # On le fait seulement si le ticket n'est PAS déjà "Prêt à être revu"
       - name: Move ticket to Ready for Review
         uses: atlassian/gajira-transition@v3
-        if: success()
+        if: success() && steps.jirastatus.outputs.status != 'Prêt à être revu' && steps.jirastatus.outputs.status != 'Ready for Review'
         with:
-          issue: FNC-3
-          transition: "automatique via webhook GitHub Actions"
+          issue: ${{ steps.jirakey.outputs.issue }}
+          transition: "3"
 
-      # 9️⃣ Ajouter un commentaire automatique sur le ticket Jira
+      # 6) Commentaire CI OK
       - name: Comment on Jira
         uses: atlassian/gajira-comment@v3
         if: success()
         with:
-          issue: FNC-3
+          issue: ${{ steps.jirakey.outputs.issue }}
           comment: "CI Passed. Ready for Peer Review."
