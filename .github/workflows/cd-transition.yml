@@ -35,7 +35,7 @@ jobs:
         uses: atlassian/gajira-transition@v3
         with:
           issue: FNC-3
-          transition: ${{ env.TRANSITION }}
+          transition: "6"
 
       - name: Deploy
         run: echo "🚀 Deploying artifact..."
