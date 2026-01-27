@@ -1,19 +1,21 @@
 name: CD Transition
 
-# Déclenche le workflow sur tout push vers develop ou main (après merge)
 on:
   push:
     branches:
       - develop
       - main
+      - feature/FNC-3-init-ci
   workflow_dispatch:
-  
+
 jobs:
   cd:
     runs-on: ubuntu-latest
 
     steps:
-      # 1️⃣ Se connecter à Jira
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Login to Jira
         uses: atlassian/gajira-login@v3
         env:
@@ -21,21 +23,19 @@ jobs:
           JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
 
-      # 2️⃣ Déterminer la transition selon la branche
       - name: Decide Jira transition
         run: |
           if [[ "${{ github.ref_name }}" == "develop" ]]; then
             echo "TRANSITION=Done" >> $GITHUB_ENV
           else
             echo "TRANSITION=Released" >> $GITHUB_ENV
+          fi
 
-      # 3️⃣ Déplacer le ticket Jira automatiquement
       - name: Move Jira ticket
         uses: atlassian/gajira-transition@v3
         with:
           issue: FNC-3
           transition: ${{ env.TRANSITION }}
 
-      # 4️⃣ Simuler le déploiement
       - name: Deploy
         run: echo "🚀 Deploying artifact..."
