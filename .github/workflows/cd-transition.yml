@@ -5,17 +5,16 @@ on:
     branches:
       - develop
       - main
-
   workflow_dispatch:
     inputs:
       issue:
-        description: "Jira issue key (ex: FNC-4). Laisse vide pour auto-detect depuis le commit."
-        required: false
-        default: ""
-      simulate_branch:
-        description: "Pour tester: force la branche cible (develop ou main). Laisse vide pour utiliser la vraie branche."
-        required: false
-        default: ""
+        description: "Jira issue key (ex: FNC-4)"
+        required: true
+        default: "FNC-4"
+      mode:
+        description: "simulate target branch: develop | main | hotfix"
+        required: true
+        default: "develop"
 
 jobs:
   cd:
@@ -32,112 +31,77 @@ jobs:
           JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
 
-      # 1) Déterminer la clé Jira
+      # 1) Determine ISSUE (from workflow_dispatch OR from merge commit message)
       - name: Determine Jira issue key
-        id: jirakey
+        id: issue
         shell: bash
         run: |
-          set -euo pipefail
-
-          INPUT_ISSUE="${{ github.event.inputs.issue }}"
-          if [ -n "$INPUT_ISSUE" ]; then
-            ISSUE="$INPUT_ISSUE"
-          else
-            MSG="${{ github.event.head_commit.message }}"
-            echo "Commit message: $MSG"
-            ISSUE=$(echo "$MSG" | grep -oE 'FNC-[0-9]+' | head -n 1 || true)
-            if [ -z "$ISSUE" ]; then
-              echo "❌ No Jira key found in commit message."
-              echo "👉 Lance le workflow manuellement (workflow_dispatch) et mets issue=FNC-4."
-              exit 1
-            fi
-          fi
-
-          echo "✅ Issue: $ISSUE"
-          echo "issue=$ISSUE" >> "$GITHUB_OUTPUT"
-
-      # 2) Décider le statut cible
-      - name: Decide target status
-        id: decide
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          SIM_BRANCH="${{ github.event.inputs.simulate_branch }}"
-          if [ -n "$SIM_BRANCH" ]; then
-            BRANCH="$SIM_BRANCH"
-          else
-            BRANCH="${{ github.ref_name }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "issue=${{ inputs.issue }}" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
           MSG="${{ github.event.head_commit.message }}"
-          echo "Branch considered: $BRANCH"
           echo "Commit message: $MSG"
 
+          ISSUE=$(echo "$MSG" | grep -oE 'FNC-[0-9]+' | head -n 1)
+          if [ -z "$ISSUE" ]; then
+            echo "❌ No Jira key found in commit message."
+            echo "➡️ Ensure PR title or merge commit contains something like FNC-4."
+            exit 1
+          fi
+
+          echo "issue=$ISSUE" >> "$GITHUB_OUTPUT"
+
+      # 2) Decide transition ID based on target branch + hotfix detection
+      - name: Decide transition id
+        id: decide
+        shell: bash
+        run: |
+          ISSUE="${{ steps.issue.outputs.issue }}"
+
+          # === IMPORTANT: put your real numeric IDs here ===
+          DONE_ID="6"        # example: transition to Done (In Dev)
+          RELEASED_ID="7"    # example: transition to Released
+          HOTFIX_ID="8"      # example: transition to Hotfix Deployed
+
+          # Decide which "branch logic" we use
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            MODE="${{ inputs.mode }}"
+            if [ "$MODE" = "develop" ]; then
+              echo "transition_id=$DONE_ID" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [ "$MODE" = "hotfix" ]; then
+              echo "transition_id=$HOTFIX_ID" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "transition_id=$RELEASED_ID" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          BRANCH="${{ github.ref_name }}"
+          MSG="${{ github.event.head_commit.message }}"
+
           if [ "$BRANCH" = "develop" ]; then
-            # Chez toi c’est souvent "Terminée(e)" (Done In Dev).
-            # Si ça ne match pas, on ajustera après le debug transitions.
-            echo "target=Terminée(e)" >> "$GITHUB_OUTPUT"
+            echo "transition_id=$DONE_ID" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           # BRANCH = main
           if echo "$MSG" | grep -qiE 'hotfix/|hotfix'; then
-            echo "target=Hotfix Deployed" >> "$GITHUB_OUTPUT"
+            echo "transition_id=$HOTFIX_ID" >> "$GITHUB_OUTPUT"
           else
-            echo "target=Released" >> "$GITHUB_OUTPUT"
+            echo "transition_id=$RELEASED_ID" >> "$GITHUB_OUTPUT"
           fi
 
-      # 3) Afficher les transitions disponibles (pour comprendre)
-      - name: Debug available transitions
-        shell: bash
-        run: |
-          set -euo pipefail
-          ISSUE="${{ steps.jirakey.outputs.issue }}"
-          echo "=== Available transitions for $ISSUE ==="
-          curl -sS -u "${{ secrets.JIRA_USER_EMAIL }}:${{ secrets.JIRA_API_TOKEN }}" \
-            -H "Accept: application/json" \
-            "${{ secrets.JIRA_BASE_URL }}/rest/api/3/issue/${ISSUE}/transitions" | jq .
-          echo ""
-
-      # 4) Trouver l'ID de transition via jq (pas de Python)
-      - name: Resolve transition id
-        id: resolve
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          ISSUE="${{ steps.jirakey.outputs.issue }}"
-          TARGET="${{ steps.decide.outputs.target }}"
-          TARGET_LC="$(echo "$TARGET" | tr '[:upper:]' '[:lower:]')"
-
-          json=$(curl -sS -u "${{ secrets.JIRA_USER_EMAIL }}:${{ secrets.JIRA_API_TOKEN }}" \
-            -H "Accept: application/json" \
-            "${{ secrets.JIRA_BASE_URL }}/rest/api/3/issue/${ISSUE}/transitions")
-
-          TRANS_ID=$(echo "$json" | jq -r --arg t "$TARGET_LC" '
-            .transitions[]
-            | select(((.name // "") | ascii_downcase | contains($t)) or (((.to.name // "") | ascii_downcase | contains($t))))
-            | .id
-          ' | head -n 1)
-
-          if [ -z "$TRANS_ID" ] || [ "$TRANS_ID" = "null" ]; then
-            echo "❌ No matching transition found for target='$TARGET'."
-            echo "👉 Donc depuis le statut ACTUEL du ticket, Jira ne propose pas une transition vers '$TARGET'."
-            echo "👉 Mets le ticket dans le bon statut (ex: Ready for Review avant Done), puis relance."
-            exit 1
-          fi
-
-          echo "✅ Transition id: $TRANS_ID"
-          echo "id=$TRANS_ID" >> "$GITHUB_OUTPUT"
-
-      # 5) Appliquer la transition
+      # 3) Apply transition
       - name: Move Jira ticket
         uses: atlassian/gajira-transition@v3
         with:
-          issue: ${{ steps.jirakey.outputs.issue }}
-          transition: ${{ steps.resolve.outputs.id }}
+          issue: ${{ steps.issue.outputs.issue }}
+          transition: ${{ steps.decide.outputs.transition_id }}
 
-      # 6) Simulation de déploiement
+      # 4) Deployment Simulation
       - name: Deploy
         run: echo "Deploying artifact..."
