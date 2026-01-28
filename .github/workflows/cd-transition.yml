@@ -32,7 +32,7 @@ jobs:
           JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
 
-      # 1) Déterminer la clé Jira (input manuel OU message du commit)
+      # 1) Déterminer la clé Jira
       - name: Determine Jira issue key
         id: jirakey
         shell: bash
@@ -56,7 +56,7 @@ jobs:
           echo "✅ Issue: $ISSUE"
           echo "issue=$ISSUE" >> "$GITHUB_OUTPUT"
 
-      # 2) Décider la cible: develop => Done (In Dev) / main => Released / main+hotfix => Hotfix Deployed
+      # 2) Décider le statut cible
       - name: Decide target status
         id: decide
         shell: bash
@@ -75,7 +75,8 @@ jobs:
           echo "Commit message: $MSG"
 
           if [ "$BRANCH" = "develop" ]; then
-            # ⚠️ Ajuste si ton Jira n'affiche pas "Terminée(e)"
+            # Chez toi c’est souvent "Terminée(e)" (Done In Dev).
+            # Si ça ne match pas, on ajustera après le debug transitions.
             echo "target=Terminée(e)" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -87,7 +88,7 @@ jobs:
             echo "target=Released" >> "$GITHUB_OUTPUT"
           fi
 
-      # 3) Debug transitions dispo (utile pour comprendre)
+      # 3) Afficher les transitions disponibles (pour comprendre)
       - name: Debug available transitions
         shell: bash
         run: |
@@ -96,10 +97,10 @@ jobs:
           echo "=== Available transitions for $ISSUE ==="
           curl -sS -u "${{ secrets.JIRA_USER_EMAIL }}:${{ secrets.JIRA_API_TOKEN }}" \
             -H "Accept: application/json" \
-            "${{ secrets.JIRA_BASE_URL }}/rest/api/3/issue/${ISSUE}/transitions" | head -c 4000
+            "${{ secrets.JIRA_BASE_URL }}/rest/api/3/issue/${ISSUE}/transitions" | jq .
           echo ""
 
-      # 4) Résoudre l'ID de transition en cherchant TARGET dans transition.name ou transition.to.name
+      # 4) Trouver l'ID de transition via jq (pas de Python)
       - name: Resolve transition id
         id: resolve
         shell: bash
@@ -108,29 +109,21 @@ jobs:
 
           ISSUE="${{ steps.jirakey.outputs.issue }}"
           TARGET="${{ steps.decide.outputs.target }}"
-          echo "Target status: $TARGET"
+          TARGET_LC="$(echo "$TARGET" | tr '[:upper:]' '[:lower:]')"
 
           json=$(curl -sS -u "${{ secrets.JIRA_USER_EMAIL }}:${{ secrets.JIRA_API_TOKEN }}" \
             -H "Accept: application/json" \
             "${{ secrets.JIRA_BASE_URL }}/rest/api/3/issue/${ISSUE}/transitions")
 
-          export TARGET
-          TRANS_ID=$(echo "$json" | python -c "import os,sys,json
-data=json.load(sys.stdin)
-target=os.environ.get('TARGET','').lower()
-tid=''
-for t in data.get('transitions',[]):
-    name=(t.get('name') or '').lower()
-    to=((t.get('to') or {}).get('name') or '').lower()
-    if target and (target in name or target in to):
-        tid=t.get('id','')
-        break
-print(tid)
-")
+          TRANS_ID=$(echo "$json" | jq -r --arg t "$TARGET_LC" '
+            .transitions[]
+            | select(((.name // "") | ascii_downcase | contains($t)) or (((.to.name // "") | ascii_downcase | contains($t))))
+            | .id
+          ' | head -n 1)
 
-          if [ -z "$TRANS_ID" ]; then
+          if [ -z "$TRANS_ID" ] || [ "$TRANS_ID" = "null" ]; then
             echo "❌ No matching transition found for target='$TARGET'."
-            echo "👉 Ça veut dire: depuis le statut ACTUEL du ticket, Jira ne propose pas une transition vers '$TARGET'."
+            echo "👉 Donc depuis le statut ACTUEL du ticket, Jira ne propose pas une transition vers '$TARGET'."
             echo "👉 Mets le ticket dans le bon statut (ex: Ready for Review avant Done), puis relance."
             exit 1
           fi
