@@ -6,17 +6,6 @@ on:
       - develop
       - main
 
-  # Permet de lancer manuellement depuis l'UI GitHub ("Run workflow")
-  workflow_dispatch:
-    inputs:
-      issue:
-        description: "Jira issue key (ex: FNC-4)"
-        required: true
-      mode:
-        description: "develop | main | hotfix (choix manuel si tu testes)"
-        required: true
-        default: "develop"
-
 jobs:
   cd:
     runs-on: ubuntu-latest
@@ -32,115 +21,96 @@ jobs:
           JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
 
-      # 1) Déterminer la clé Jira
-      # - en "push": on essaye de la trouver dans le message du commit (merge commit)
-      # - en "workflow_dispatch": tu la donnes toi-même
-      - name: Resolve Jira issue key
-        id: issue
+      # 1) Extract Jira key from the merge commit message
+      - name: Extract Jira issue key
+        id: jirakey
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            ISSUE="${{ inputs.issue }}"
-          else
-            MSG="${{ github.event.head_commit.message }}"
-            echo "Head commit message: $MSG"
-            ISSUE=$(echo "$MSG" | grep -oE 'FNC-[0-9]+' | head -n 1)
-          fi
+          MSG="${{ github.event.head_commit.message }}"
+          echo "Commit message: $MSG"
+
+          ISSUE=$(echo "$MSG" | grep -oE 'FNC-[0-9]+' | head -n 1)
 
           if [ -z "$ISSUE" ]; then
-            echo "❌ No Jira key found."
-            echo "➡️ Solution: make sure your merge commit / PR title contains FNC-123"
+            echo "❌ No Jira key found in merge commit message."
+            echo "✅ Put FNC-123 in PR title (recommended)."
             exit 1
           fi
 
           echo "✅ Issue detected: $ISSUE"
           echo "issue=$ISSUE" >> "$GITHUB_OUTPUT"
 
-      # 2) Décider la cible selon la branche
-      # - develop => Done (In Dev)
-      # - main => Released
-      # - main + hotfix => Hotfix Deployed (détecté via message de merge si possible)
-      # - en manuel (workflow_dispatch): tu choisis via input "mode"
-      - name: Decide target type
+      # 2) Decide which transition we want (by NAME)
+      # (We do NOT hardcode numeric IDs, Jira language can vary, so we resolve dynamically)
+      - name: Decide target transition name
         id: decide
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            MODE="${{ inputs.mode }}"
-          else
-            MODE="${{ github.ref_name }}"   # develop ou main
+          BRANCH="${{ github.ref_name }}"
+          MSG="${{ github.event.head_commit.message }}"
 
-            if [ "$MODE" = "main" ]; then
-              MSG="${{ github.event.head_commit.message }}"
-              # Si c'est un merge commit classique, il contient souvent "hotfix/"
-              if echo "$MSG" | grep -qiE 'hotfix/|hotfix'; then
-                MODE="hotfix"
-              fi
-            fi
+          echo "Target branch: $BRANCH"
+          echo "Message: $MSG"
+
+          if [ "$BRANCH" = "develop" ]; then
+            # Your Jira is in French in your screenshots -> usually "Terminé(e)"
+            echo "target=Terminé(e)" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
-          echo "Chosen mode: $MODE"
-
-          # IMPORTANT: ici on met des "mots-clés" (pas des noms exacts) pour matcher FR/EN
-          if [ "$MODE" = "develop" ]; then
-            TARGET_KEYWORD="termin"      # match "Terminé(e)" ou "Done"
-          elif [ "$MODE" = "hotfix" ]; then
-            TARGET_KEYWORD="hotfix"
+          # branch = main
+          # If merge commit mentions hotfix, treat as hotfix deploy
+          if echo "$MSG" | grep -qiE 'hotfix/|hotfix'; then
+            echo "target=Hotfix Deployed" >> "$GITHUB_OUTPUT"
           else
-            TARGET_KEYWORD="releas"      # match "Released"
+            echo "target=Released" >> "$GITHUB_OUTPUT"
           fi
 
-          echo "target_keyword=$TARGET_KEYWORD" >> "$GITHUB_OUTPUT"
-
-      # 3) Debug transitions (tu voulais savoir où l'ajouter => c'est ici)
-      - name: Debug Jira transitions (TEMP)
-        shell: bash
-        run: |
-          ISSUE="${{ steps.issue.outputs.issue }}"
-          echo "=== Available transitions for $ISSUE ==="
-          curl -sS -u "${{ secrets.JIRA_USER_EMAIL }}:${{ secrets.JIRA_API_TOKEN }}" \
-            -H "Accept: application/json" \
-            "${{ secrets.JIRA_BASE_URL }}/rest/api/3/issue/${ISSUE}/transitions" \
-          | jq -r '.transitions[] | "\(.id) | \(.name) -> \(.to.name)"'
-
-      # 4) Trouver automatiquement l'ID de transition correspondant
-      - name: Resolve transition id
+      # 3) Resolve transition ID from Jira API safely (no YAML multi-line python)
+      - name: Resolve transition id from Jira
         id: trans
         shell: bash
         run: |
-          ISSUE="${{ steps.issue.outputs.issue }}"
-          KEY="${{ steps.decide.outputs.target_keyword }}"
+          ISSUE="${{ steps.jirakey.outputs.issue }}"
+          TARGET="${{ steps.decide.outputs.target }}"
 
-          json=$(curl -sS -u "${{ secrets.JIRA_USER_EMAIL }}:${{ secrets.JIRA_API_TOKEN }}" \
+          echo "Issue: $ISSUE"
+          echo "Target: $TARGET"
+
+          JSON=$(curl -sS -u "${{ secrets.JIRA_USER_EMAIL }}:${{ secrets.JIRA_API_TOKEN }}" \
             -H "Accept: application/json" \
             "${{ secrets.JIRA_BASE_URL }}/rest/api/3/issue/${ISSUE}/transitions")
 
-          echo "$json" > transitions.json
+          # Save JSON for debug if needed
+          echo "$JSON" | head -c 2000
 
-          TRANS_ID=$(jq -r --arg k "$KEY" '
-            .transitions[]
-            | select(((.name|ascii_downcase) | contains($k)) or (((.to.name // "")|ascii_downcase) | contains($k)))
-            | .id
-          ' transitions.json | head -n 1)
+          # Use python one-liner WITHOUT multiline (prevents invalid YAML)
+          TRANS_ID=$(python -c "import json,sys; data=json.loads(sys.stdin.read()); target='''$TARGET'''.lower(); 
+for t in data.get('transitions',[]):
+    name=(t.get('name') or '').lower()
+    to=((t.get('to') or {}).get('name') or '').lower()
+    if target in name or target in to:
+        print(t.get('id',''))
+        break
+" <<< "$JSON")
 
-          if [ -z "$TRANS_ID" ] || [ "$TRANS_ID" = "null" ]; then
-            echo "❌ No matching transition found for keyword='$KEY'"
-            echo "➡️ That means: from the CURRENT Jira status, Jira does not offer that transition."
-            echo "Available transitions:"
-            jq -r '.transitions[] | "\(.id) | \(.name) -> \(.to.name)"' transitions.json
+          if [ -z "$TRANS_ID" ]; then
+            echo "❌ No matching transition found for target='$TARGET'"
+            echo "✅ This means Jira does NOT offer this transition from the CURRENT status."
+            echo "✅ Fix: put the ticket in a status that can go to '$TARGET' (via the system steps before)."
             exit 1
           fi
 
-          echo "✅ Transition id chosen: $TRANS_ID"
+          echo "✅ Transition ID = $TRANS_ID"
           echo "id=$TRANS_ID" >> "$GITHUB_OUTPUT"
 
-      # 5) Appliquer la transition Jira (avec ID numérique)
+      # 4) Apply Jira transition using the resolved ID
       - name: Move Jira ticket
         uses: atlassian/gajira-transition@v3
         with:
-          issue: ${{ steps.issue.outputs.issue }}
+          issue: ${{ steps.jirakey.outputs.issue }}
           transition: ${{ steps.trans.outputs.id }}
 
-      # 6) Simulation déploiement
+      # 5) Deployment simulation
       - name: Deploy
         run: echo "Deploying artifact..."
