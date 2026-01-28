@@ -5,6 +5,8 @@ on:
     branches:
       - develop
       - main
+
+  # Pour tester manuellement sans merge (optionnel mais utile)
   workflow_dispatch:
     inputs:
       issue:
@@ -12,7 +14,7 @@ on:
         required: true
         default: "FNC-4"
       mode:
-        description: "simulate target branch: develop | main | hotfix"
+        description: "develop | main | hotfix"
         required: true
         default: "develop"
 
@@ -31,7 +33,7 @@ jobs:
           JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
 
-      # 1) Determine ISSUE (from workflow_dispatch OR from merge commit message)
+      # 1) Déterminer le ticket Jira (soit depuis workflow_dispatch, soit depuis le message du commit)
       - name: Determine Jira issue key
         id: issue
         shell: bash
@@ -47,25 +49,33 @@ jobs:
           ISSUE=$(echo "$MSG" | grep -oE 'FNC-[0-9]+' | head -n 1)
           if [ -z "$ISSUE" ]; then
             echo "❌ No Jira key found in commit message."
-            echo "➡️ Ensure PR title or merge commit contains something like FNC-4."
+            echo "➡️ Mets FNC-4 / FNC-5 dans le titre du PR ou dans le commit."
             exit 1
           fi
 
           echo "issue=$ISSUE" >> "$GITHUB_OUTPUT"
 
-      # 2) Decide transition ID based on target branch + hotfix detection
+      # 2) DEBUG TEMPORAIRE : afficher les transitions disponibles + leurs IDs
+      - name: Debug Jira transitions (TEMP)
+        shell: bash
+        run: |
+          ISSUE="${{ steps.issue.outputs.issue }}"
+          echo "=== Transitions disponibles pour $ISSUE ==="
+          curl -sS -u "${{ secrets.JIRA_USER_EMAIL }}:${{ secrets.JIRA_API_TOKEN }}" \
+            -H "Accept: application/json" \
+            "${{ secrets.JIRA_BASE_URL }}/rest/api/3/issue/${ISSUE}/transitions" | head -c 4000
+
+      # 3) Choisir l'ID de transition selon develop/main/hotfix
       - name: Decide transition id
         id: decide
         shell: bash
         run: |
-          ISSUE="${{ steps.issue.outputs.issue }}"
+          # ✅ IMPORTANT :
+          # Tu vas remplacer ces 3 valeurs après avoir vu les IDs dans "Debug Jira transitions (TEMP)"
+          DONE_ID="6"       # Done (In Dev)
+          RELEASED_ID="7"   # Released
+          HOTFIX_ID="8"     # Hotfix Deployed
 
-          # === IMPORTANT: put your real numeric IDs here ===
-          DONE_ID="6"        # example: transition to Done (In Dev)
-          RELEASED_ID="7"    # example: transition to Released
-          HOTFIX_ID="8"      # example: transition to Hotfix Deployed
-
-          # Decide which "branch logic" we use
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             MODE="${{ inputs.mode }}"
             if [ "$MODE" = "develop" ]; then
@@ -83,25 +93,26 @@ jobs:
           BRANCH="${{ github.ref_name }}"
           MSG="${{ github.event.head_commit.message }}"
 
+          # Merge vers develop => Done
           if [ "$BRANCH" = "develop" ]; then
             echo "transition_id=$DONE_ID" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          # BRANCH = main
+          # Merge vers main: si le merge vient d’un hotfix => Hotfix Deployed sinon Released
           if echo "$MSG" | grep -qiE 'hotfix/|hotfix'; then
             echo "transition_id=$HOTFIX_ID" >> "$GITHUB_OUTPUT"
           else
             echo "transition_id=$RELEASED_ID" >> "$GITHUB_OUTPUT"
           fi
 
-      # 3) Apply transition
+      # 4) Appliquer la transition Jira (avec l'ID choisi)
       - name: Move Jira ticket
         uses: atlassian/gajira-transition@v3
         with:
           issue: ${{ steps.issue.outputs.issue }}
           transition: ${{ steps.decide.outputs.transition_id }}
 
-      # 4) Deployment Simulation
+      # 5) Simulation du déploiement
       - name: Deploy
         run: echo "Deploying artifact..."
