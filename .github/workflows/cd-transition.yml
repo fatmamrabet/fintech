@@ -6,7 +6,7 @@ on:
       - develop
       - main
 
-  # Pour tester à la main depuis l'onglet Actions
+  # Pour lancer manuellement un test depuis l'onglet Actions
   workflow_dispatch:
     inputs:
       issue_key:
@@ -33,8 +33,8 @@ jobs:
           JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
 
-      # 1) Decide ISSUE + "mode" (push vs manual)
-      - name: Decide issue + mode + target
+      # 1) Decide ISSUE + scenario (develop/main/hotfix)
+      - name: Decide issue + scenario
         id: decide
         shell: bash
         run: |
@@ -43,61 +43,71 @@ jobs:
           EVENT="${{ github.event_name }}"
           BRANCH="${{ github.ref_name }}"
 
-          # --- Manual run (workflow_dispatch) ---
+          # Manual run (workflow_dispatch)
           if [ "$EVENT" = "workflow_dispatch" ]; then
-            echo "issue=${{ inputs.issue_key }}" >> "$GITHUB_OUTPUT"
-            echo "branch_sim=${{ inputs.simulate_target }}" >> "$GITHUB_OUTPUT"
-            echo "mode=manual" >> "$GITHUB_OUTPUT"
+            ISSUE="${{ inputs.issue_key }}"
+            TARGET="${{ inputs.simulate_target }}"
+            echo "issue=$ISSUE" >> "$GITHUB_OUTPUT"
+            echo "target=$TARGET" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          # --- Push run (after merge/push to develop/main) ---
+          # Push after merge to develop/main
           MSG="${{ github.event.head_commit.message }}"
           echo "Commit message: $MSG"
 
           ISSUE=$(echo "$MSG" | grep -oE 'FNC-[0-9]+' | head -n 1)
           if [ -z "$ISSUE" ]; then
             echo "❌ No Jira key found in merge commit message."
-            echo "✅ Fix: ensure PR title contains FNC-xx before merging."
+            echo "✅ Fix: put FNC-xx in the PR title before merging."
             exit 1
           fi
 
-          echo "issue=$ISSUE" >> "$GITHUB_OUTPUT"
-          echo "branch_sim=$BRANCH" >> "$GITHUB_OUTPUT"
-          echo "mode=push" >> "$GITHUB_OUTPUT"
+          # target = develop OR main OR hotfix (if main + hotfix keyword)
+          if [ "$BRANCH" = "develop" ]; then
+            TARGET="develop"
+          else
+            if echo "$MSG" | grep -qiE 'hotfix/|hotfix'; then
+              TARGET="hotfix"
+            else
+              TARGET="main"
+            fi
+          fi
 
-      # 2) Apply the correct Jira transitions
-      #    develop -> Done (In Dev)
-      #    main release -> Released (if not possible: Done then Released)
-      #    main hotfix -> Hotfix Deployed
+          echo "issue=$ISSUE" >> "$GITHUB_OUTPUT"
+          echo "target=$TARGET" >> "$GITHUB_OUTPUT"
+
+      # 2) Apply Jira transitions SMART:
+      # develop -> Done (In Dev)
+      # main -> Released (if not possible: Done then Released)
+      # hotfix -> Hotfix Deployed
       - name: Apply Jira transitions (smart)
-        id: apply
         shell: bash
         run: |
           set -e
 
           ISSUE="${{ steps.decide.outputs.issue }}"
-          TARGET="${{ steps.decide.outputs.branch_sim }}"
+          TARGET="${{ steps.decide.outputs.target }}"
+
           echo "Issue: $ISSUE"
-          echo "Target (branch or simulation): $TARGET"
+          echo "Scenario target: $TARGET"
 
-          # Helpers: find transition id by matching "to.name" contains token (case-insensitive)
-          get_transition_id () {
-            local token="$1"
-            local json
-            json=$(curl -sS -u "${{ secrets.JIRA_USER_EMAIL }}:${{ secrets.JIRA_API_TOKEN }}" \
+          get_transitions () {
+            curl -sS -u "${{ secrets.JIRA_USER_EMAIL }}:${{ secrets.JIRA_API_TOKEN }}" \
               -H "Accept: application/json" \
-              "${{ secrets.JIRA_BASE_URL }}/rest/api/3/issue/${ISSUE}/transitions")
+              "${{ secrets.JIRA_BASE_URL }}/rest/api/3/issue/${ISSUE}/transitions"
+          }
 
-            # Print available transitions (useful for debug)
-            echo "Available transitions:"
-            echo "$json" | jq -r '.transitions[] | " - id=" + .id + " | name=" + .name + " | to=" + .to.name' || true
-
-            # Return first matching id
+          # find transition id by token match in "to.name" OR transition "name"
+          find_id () {
+            local token="$1"
+            local json="$2"
             echo "$json" | jq -r --arg t "$token" '
               .transitions[]
-              | select( ((.to.name // "" | ascii_downcase) | contains($t | ascii_downcase))
-                     or ((.name   // "" | ascii_downcase) | contains($t | ascii_downcase)) )
+              | select(
+                  ((.to.name // "" | ascii_downcase) | contains($t | ascii_downcase))
+                  or ((.name // "" | ascii_downcase) | contains($t | ascii_downcase))
+                )
               | .id
             ' | head -n 1
           }
@@ -113,66 +123,62 @@ jobs:
               "${{ secrets.JIRA_BASE_URL }}/rest/api/3/issue/${ISSUE}/transitions" >/dev/null
           }
 
-          # Decide scenario
+          JSON="$(get_transitions)"
+          echo "Available transitions:"
+          echo "$JSON" | jq -r '.transitions[] | " - id=" + .id + " | name=" + .name + " | to=" + .to.name' || true
+
+          # Tokens:
+          # Done (In Dev) chez toi = "Terminé(e)" ou "Terminée(e)" -> token "termin"
+          # Released = "released"
+          # Hotfix Deployed = "hotfix"
           if [ "$TARGET" = "develop" ]; then
-            # Done (In Dev) in your Jira is "Terminé(e)" / "Terminée(e)" -> we match token "termin"
-            ID_DONE=$(get_transition_id "termin")
+            ID_DONE="$(find_id "termin" "$JSON")"
             if [ -z "$ID_DONE" ] || [ "$ID_DONE" = "null" ]; then
               echo "❌ No transition found for Done (token=termin)"
               exit 1
             fi
             do_transition "$ID_DONE"
-            echo "✅ Moved to Done (In Dev)"
+            echo "✅ moved to Done (In Dev)"
             exit 0
           fi
 
-          # main path (release or hotfix)
-          # If commit message mentions hotfix -> hotfix deployed
-          MSG="${{ github.event.head_commit.message }}"
-          if [ "${{ steps.decide.outputs.mode }}" = "manual" ] && [ "$TARGET" = "hotfix" ]; then
-            IS_HOTFIX="yes"
-          elif echo "$MSG" | grep -qiE 'hotfix/|hotfix'; then
-            IS_HOTFIX="yes"
-          else
-            IS_HOTFIX="no"
-          fi
-
-          if [ "$IS_HOTFIX" = "yes" ]; then
-            ID_HOTFIX=$(get_transition_id "hotfix")
+          if [ "$TARGET" = "hotfix" ]; then
+            ID_HOTFIX="$(find_id "hotfix" "$JSON")"
             if [ -z "$ID_HOTFIX" ] || [ "$ID_HOTFIX" = "null" ]; then
               echo "❌ No transition found for Hotfix Deployed (token=hotfix)"
               exit 1
             fi
             do_transition "$ID_HOTFIX"
-            echo "✅ Moved to Hotfix Deployed"
+            echo "✅ moved to Hotfix Deployed"
             exit 0
           fi
 
-          # Standard release -> Released
-          ID_REL=$(get_transition_id "released")
+          # TARGET = main (standard release)
+          ID_REL="$(find_id "released" "$JSON")"
           if [ -n "$ID_REL" ] && [ "$ID_REL" != "null" ]; then
             do_transition "$ID_REL"
-            echo "✅ Moved to Released"
+            echo "✅ moved to Released"
             exit 0
           fi
 
-          # If Released is not available, do Done then Released
           echo "⚠️ Released not available from current status. Doing Done -> Released."
 
-          ID_DONE=$(get_transition_id "termin")
+          ID_DONE="$(find_id "termin" "$JSON")"
           if [ -z "$ID_DONE" ] || [ "$ID_DONE" = "null" ]; then
-            echo "❌ Can't even move to Done (token=termin)."
+            echo "❌ Can't move to Done (token=termin)."
             exit 1
           fi
           do_transition "$ID_DONE"
 
-          ID_REL2=$(get_transition_id "released")
+          JSON2="$(get_transitions)"
+          ID_REL2="$(find_id "released" "$JSON2")"
           if [ -z "$ID_REL2" ] || [ "$ID_REL2" = "null" ]; then
             echo "❌ Still no Released after moving to Done."
             exit 1
           fi
           do_transition "$ID_REL2"
-          echo "✅ Moved to Released (after Done)"
+          echo "✅ moved to Released (after Done)"
 
+      # 3) Deploy simulation (required)
       - name: Deploy
         run: echo "Deploying artifact..."
