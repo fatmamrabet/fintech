@@ -47,7 +47,7 @@ jobs:
           echo "Branch: $BRANCH"
 
           if [ "$BRANCH" = "develop" ]; then
-            TARGET_STATUS="Done"
+            TARGET_STATUS="Terminé"
           else
             TARGET_STATUS="Released"
           fi
