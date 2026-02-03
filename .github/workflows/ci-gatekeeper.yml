@@ -17,13 +17,12 @@ jobs:
       # 1) Vérifie qu'on a une clé Jira dans la branche ou le titre
       - name: Check Jira ticket + Extract key
         id: jirakey
+        shell: bash
         run: |
           echo "Branch: ${{ github.head_ref }}"
           echo "PR title: ${{ github.event.pull_request.title }}"
 
           text="${{ github.head_ref }} ${{ github.event.pull_request.title }}"
-
-          # extrait FNC-123 (adapte si un autre projet Jira)
           issue=$(echo "$text" | grep -oE 'FNC-[0-9]+' | head -n 1)
 
           if [ -z "$issue" ]; then
@@ -32,7 +31,7 @@ jobs:
           fi
 
           echo "✅ Jira issue detected: $issue"
-          echo "issue=$issue" >> $GITHUB_OUTPUT
+          echo "issue=$issue" >> "$GITHUB_OUTPUT"
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -57,11 +56,13 @@ jobs:
           JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
 
-      # 3) Lire le statut actuel pour éviter de casser si déjà Ready for Review
+      # 3) Lire le statut actuel
       - name: Get Jira status
         id: jirastatus
         if: success()
+        shell: bash
         run: |
+          set -e
           ISSUE="${{ steps.jirakey.outputs.issue }}"
 
           status=$(curl -sS -u "${{ secrets.JIRA_USER_EMAIL }}:${{ secrets.JIRA_API_TOKEN }}" \
@@ -70,31 +71,59 @@ jobs:
             | python -c "import sys,json; print(json.load(sys.stdin)['fields']['status']['name'])")
 
           echo "Current Jira status: $status"
-          echo "status=$status" >> $GITHUB_OUTPUT
+          echo "status=$status" >> "$GITHUB_OUTPUT"
 
-      # 4) Debug transitions (optionnel, tu peux supprimer après)
-      - name: Debug Jira transitions
+      # 4) Transition vers Ready for Review (SMART, ne casse pas si impossible)
+      - name: Move ticket to Ready for Review (smart)
         if: success()
+        shell: bash
         run: |
+          set -e
+
           ISSUE="${{ steps.jirakey.outputs.issue }}"
-          echo "=== Calling Jira transitions API for $ISSUE ==="
+          STATUS="${{ steps.jirastatus.outputs.status }}"
 
-          curl -sS --request GET \
-            --url "${{ secrets.JIRA_BASE_URL }}/rest/api/3/issue/${ISSUE}/transitions" \
-            --user "${{ secrets.JIRA_USER_EMAIL }}:${{ secrets.JIRA_API_TOKEN }}" \
-            --header "Accept: application/json" | head -c 4000
+          echo "Issue: $ISSUE"
+          echo "Current status: $STATUS"
 
-      # 5) Transition vers Ready for Review (ID=3 chez toi)
-      # On le fait seulement si le ticket n'est PAS déjà "Prêt à être revu"
-      - name: Move ticket to Ready for Review
-        uses: atlassian/gajira-transition@v3
-        if: success() && steps.jirastatus.outputs.status != 'Prêt à être revu' && steps.jirastatus.outputs.status != 'Ready for Review'
-        with:
-          issue: ${{ steps.jirakey.outputs.issue }}
-          transition: "automatique via webhook GitHub Actions"
+          # Si déjà "done/released/hotfix/ready", on ne fait rien (idempotent)
+          # NOTE: adapte les mots si Jira affiche d'autres libellés exacts
+          if echo "$STATUS" | grep -qiE 'prêt à être revu|ready for review|termin|done|released|hotfix'; then
+            echo "✅ Skip: issue already beyond review stage (or already ready)."
+            exit 0
+          fi
 
+          # Récupère les transitions disponibles depuis l'état actuel
+          JSON=$(curl -sS -u "${{ secrets.JIRA_USER_EMAIL }}:${{ secrets.JIRA_API_TOKEN }}" \
+            -H "Accept: application/json" \
+            "${{ secrets.JIRA_BASE_URL }}/rest/api/3/issue/${ISSUE}/transitions")
 
-      # 6) Commentaire CI OK
+          echo "Available transitions:"
+          echo "$JSON" | jq -r '.transitions[] | " - id=" + .id + " | name=" + .name + " | to=" + .to.name' || true
+
+          # Cherche une transition qui mène vers Ready for Review / Prêt à être revu
+          ID=$(echo "$JSON" | jq -r '
+            .transitions[]
+            | select((.to.name // "" | ascii_downcase) | test("ready for review|prêt à être revu"))
+            | .id
+          ' | head -n 1)
+
+          if [ -z "$ID" ] || [ "$ID" = "null" ]; then
+            echo "✅ Skip: no transition to Ready for Review exists from current status."
+            exit 0
+          fi
+
+          echo "➡️ Applying transition id=$ID (to Ready for Review)"
+          curl -sS -u "${{ secrets.JIRA_USER_EMAIL }}:${{ secrets.JIRA_API_TOKEN }}" \
+            -H "Accept: application/json" \
+            -H "Content-Type: application/json" \
+            -X POST \
+            --data "{\"transition\":{\"id\":\"$ID\"}}" \
+            "${{ secrets.JIRA_BASE_URL }}/rest/api/3/issue/${ISSUE}/transitions" >/dev/null
+
+          echo "✅ Moved to Ready for Review"
+
+      # 5) Commentaire CI OK
       - name: Comment on Jira
         uses: atlassian/gajira-comment@v3
         if: success()
