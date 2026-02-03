@@ -27,7 +27,8 @@ jobs:
         run: |
           set -e
           MSG="${{ github.event.head_commit.message }}"
-          echo "Commit message: $MSG"
+          echo "Commit message (raw):"
+          echo "$MSG"
 
           ISSUE=$(echo "$MSG" | grep -oE 'FNC-[0-9]+' | head -n 1)
           if [ -z "$ISSUE" ]; then
@@ -36,7 +37,6 @@ jobs:
           fi
 
           echo "issue=$ISSUE" >> "$GITHUB_OUTPUT"
-          echo "msg=$MSG" >> "$GITHUB_OUTPUT"
 
       - name: Move ticket based on target branch
         shell: bash
@@ -44,16 +44,17 @@ jobs:
           set -e
           ISSUE="${{ steps.jira.outputs.issue }}"
           BRANCH="${{ github.ref_name }}"
-          MSG="${{ steps.jira.outputs.msg }}"
+          MSG="${{ github.event.head_commit.message }}"
 
           echo "Issue: $ISSUE"
           echo "Branch: $BRANCH"
-          echo "Commit message: $MSG"
+          echo "Commit message (raw):"
+          echo "$MSG"
 
           # ✅ EXERCICE:
-          # - develop => Done (In Dev) (chez toi: "Terminé")
-          # - main (hotfix) => Hotfix Deployed
-          # - main (standard) => Released
+          # develop => Done (In Dev) (chez toi: "Terminé")
+          # main + hotfix => Hotfix Deployed
+          # main normal => Released
           if [ "$BRANCH" = "develop" ]; then
             TARGET_STATUS="Terminé"
           else
@@ -85,7 +86,7 @@ jobs:
             -H "Content-Type: application/json" \
             -X POST \
             --data "{\"transition\":{\"id\":\"$ID\"}}" \
-            "${{ secrets.JIRA_BASE_URL }}/rest/api/3/issue/${ISSUE}/transitions"
+            "${{ secrets.JIRA_BASE_URL }}/rest/api/3/issue/${ISSUE}/transitions" >/dev/null
 
           echo "✅ Jira transition done"
 
