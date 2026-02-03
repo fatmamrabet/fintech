@@ -91,7 +91,8 @@ jobs:
         if: success() && steps.jirastatus.outputs.status != 'Prêt à être revu' && steps.jirastatus.outputs.status != 'Ready for Review'
         with:
           issue: ${{ steps.jirakey.outputs.issue }}
-          transition: "3"
+          transition: "automatique via webhook GitHub Actions"
+
 
       # 6) Commentaire CI OK
       - name: Comment on Jira
