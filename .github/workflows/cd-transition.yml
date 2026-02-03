@@ -25,31 +25,43 @@ jobs:
         id: jira
         shell: bash
         run: |
+          set -e
           MSG="${{ github.event.head_commit.message }}"
           echo "Commit message: $MSG"
 
           ISSUE=$(echo "$MSG" | grep -oE 'FNC-[0-9]+' | head -n 1)
-
           if [ -z "$ISSUE" ]; then
             echo "❌ No Jira key found in commit message"
             exit 1
           fi
 
-          echo "issue=$ISSUE" >> $GITHUB_OUTPUT
+          echo "issue=$ISSUE" >> "$GITHUB_OUTPUT"
+          echo "msg=$MSG" >> "$GITHUB_OUTPUT"
 
       - name: Move ticket based on target branch
         shell: bash
         run: |
+          set -e
           ISSUE="${{ steps.jira.outputs.issue }}"
           BRANCH="${{ github.ref_name }}"
+          MSG="${{ steps.jira.outputs.msg }}"
 
           echo "Issue: $ISSUE"
           echo "Branch: $BRANCH"
+          echo "Commit message: $MSG"
 
+          # ✅ EXERCICE:
+          # - develop => Done (In Dev) (chez toi: "Terminé")
+          # - main (hotfix) => Hotfix Deployed
+          # - main (standard) => Released
           if [ "$BRANCH" = "develop" ]; then
             TARGET_STATUS="Terminé"
           else
-            TARGET_STATUS="Released"
+            if echo "$MSG" | grep -qi "hotfix"; then
+              TARGET_STATUS="Hotfix Deployed"
+            else
+              TARGET_STATUS="Released"
+            fi
           fi
 
           echo "Target status: $TARGET_STATUS"
@@ -58,10 +70,11 @@ jobs:
             -H "Accept: application/json" \
             "${{ secrets.JIRA_BASE_URL }}/rest/api/3/issue/${ISSUE}/transitions")
 
-          echo "$TRANSITIONS" | jq -r '.transitions[] | " - " + .id + " -> " + .to.name'
+          echo "Available transitions:"
+          echo "$TRANSITIONS" | jq -r '.transitions[] | " - " + .id + " -> " + .to.name' || true
 
           ID=$(echo "$TRANSITIONS" | jq -r --arg t "$TARGET_STATUS" \
-            '.transitions[] | select(.to.name | contains($t)) | .id' | head -n 1)
+            '.transitions[] | select((.to.name // "") | ascii_downcase | contains($t | ascii_downcase)) | .id' | head -n 1)
 
           if [ -z "$ID" ] || [ "$ID" = "null" ]; then
             echo "❌ Transition to $TARGET_STATUS not found"
