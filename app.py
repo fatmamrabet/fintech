@@ -4,3 +4,4 @@ def health_check():
 
 def add(a, b):
     return a + b
+# small optimization placeholder
