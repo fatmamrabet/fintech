@@ -51,14 +51,14 @@ jobs:
           echo "Commit message (raw):"
           echo "$MSG"
 
-          # ✅ EXERCICE:
-          # develop => Done (In Dev) (chez toi: "Terminé")
-          # main + hotfix => Hotfix Deployed
-          # main normal => Released
+          # EXERCICE:
+          # - develop => Done (In Dev) (chez toi: "Terminé")
+          # - main (hotfix) => Hotfix Deployed
+          # - main (standard) => Released
           if [ "$BRANCH" = "develop" ]; then
             TARGET_STATUS="Terminé"
           else
-            if echo "$MSG" | grep -qi "hotfix"; then
+            if echo "$MSG" | grep -qiE "hotfix"; then
               TARGET_STATUS="Hotfix Deployed"
             else
               TARGET_STATUS="Released"
@@ -74,12 +74,16 @@ jobs:
           echo "Available transitions:"
           echo "$TRANSITIONS" | jq -r '.transitions[] | " - " + .id + " -> " + .to.name' || true
 
-          ID=$(echo "$TRANSITIONS" | jq -r --arg t "$TARGET_STATUS" \
-            '.transitions[] | select((.to.name // "") | ascii_downcase | contains($t | ascii_downcase)) | .id' | head -n 1)
+          ID=$(echo "$TRANSITIONS" | jq -r --arg t "$TARGET_STATUS" '
+            .transitions[]
+            | select(((.to.name // "") | ascii_downcase) | contains(($t | ascii_downcase)))
+            | .id
+          ' | head -n 1)
 
+          # ✅ IMPORTANT: ne PAS échouer si la transition n'existe pas
           if [ -z "$ID" ] || [ "$ID" = "null" ]; then
-            echo "❌ Transition to $TARGET_STATUS not found"
-            exit 1
+            echo "✅ Nothing to do: transition to '$TARGET_STATUS' not available (already there or not reachable)."
+            exit 0
           fi
 
           curl -sS -u "${{ secrets.JIRA_USER_EMAIL }}:${{ secrets.JIRA_API_TOKEN }}" \
@@ -88,7 +92,7 @@ jobs:
             --data "{\"transition\":{\"id\":\"$ID\"}}" \
             "${{ secrets.JIRA_BASE_URL }}/rest/api/3/issue/${ISSUE}/transitions" >/dev/null
 
-          echo "✅ Jira transition done"
+          echo "✅ Jira transition done to: $TARGET_STATUS"
 
       - name: Deploy
         run: echo "Deploying artifact..."
