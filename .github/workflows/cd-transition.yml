@@ -25,6 +25,7 @@ jobs:
         id: jira
         shell: bash
         run: |
+          set -e
           MSG="${{ github.event.head_commit.message }}"
           echo "Commit message: $MSG"
 
@@ -35,7 +36,8 @@ jobs:
             exit 1
           fi
 
-          echo "issue=$ISSUE" >> $GITHUB_OUTPUT
+          echo "Jira issue detected: $ISSUE"
+          echo "issue=$ISSUE" >> "$GITHUB_OUTPUT"
 
       - name: Move ticket based on target branch
         shell: bash
@@ -49,8 +51,10 @@ jobs:
           echo "Branch: $BRANCH"
           echo "Commit message: $MSG"
 
+          # ===== Decide target status =====
           if [ "$BRANCH" = "develop" ]; then
-            TARGET_STATUS="Done (In Dev)"
+            # Exercise wants: Done
+            TARGET_STATUS="Done"
           else
             # main
             if echo "$MSG" | grep -qi "hotfix"; then
@@ -62,64 +66,29 @@ jobs:
 
           echo "Target status: $TARGET_STATUS"
 
+          # ===== Fetch transitions =====
           TRANSITIONS=$(curl -sS -u "${{ secrets.JIRA_USER_EMAIL }}:${{ secrets.JIRA_API_TOKEN }}" \
             -H "Accept: application/json" \
             "${{ secrets.JIRA_BASE_URL }}/rest/api/3/issue/${ISSUE}/transitions")
 
           echo "Available transitions:"
-          echo "$TRANSITIONS" | jq -r '.transitions[] | " - id=" + .id + " | to=" + .to.name'
+          echo "$TRANSITIONS" | jq -r '.transitions[] | " - id=" + .id + " | name=" + .name + " | to=" + .to.name' || true
 
+          # ===== Find transition whose DESTINATION status name matches exactly =====
           ID=$(echo "$TRANSITIONS" | jq -r --arg t "$TARGET_STATUS" \
             '.transitions[] | select(.to.name == $t) | .id' | head -n 1)
 
           if [ -z "$ID" ] || [ "$ID" = "null" ]; then
-            echo "Transition to $TARGET_STATUS not found"
+            echo "Transition to '$TARGET_STATUS' not found"
             exit 1
           fi
 
+          echo "Applying transition id=$ID (to $TARGET_STATUS)"
           curl -sS -u "${{ secrets.JIRA_USER_EMAIL }}:${{ secrets.JIRA_API_TOKEN }}" \
             -H "Content-Type: application/json" \
             -X POST \
             --data "{\"transition\":{\"id\":\"$ID\"}}" \
             "${{ secrets.JIRA_BASE_URL }}/rest/api/3/issue/${ISSUE}/transitions" >/dev/null
-
-          echo "Jira transition done"
-
-        shell: bash
-        run: |
-          ISSUE="${{ steps.jira.outputs.issue }}"
-          BRANCH="${{ github.ref_name }}"
-
-          echo "Issue: $ISSUE"
-          echo "Branch: $BRANCH"
-
-          if [ "$BRANCH" = "develop" ]; then
-            TARGET_STATUS="Terminé"
-          else
-            TARGET_STATUS="Released"
-          fi
-
-          echo "Target status: $TARGET_STATUS"
-
-          TRANSITIONS=$(curl -sS -u "${{ secrets.JIRA_USER_EMAIL }}:${{ secrets.JIRA_API_TOKEN }}" \
-            -H "Accept: application/json" \
-            "${{ secrets.JIRA_BASE_URL }}/rest/api/3/issue/${ISSUE}/transitions")
-
-          echo "$TRANSITIONS" | jq -r '.transitions[] | " - " + .id + " -> " + .to.name'
-
-          ID=$(echo "$TRANSITIONS" | jq -r --arg t "$TARGET_STATUS" \
-            '.transitions[] | select(.to.name | contains($t)) | .id' | head -n 1)
-
-          if [ -z "$ID" ] || [ "$ID" = "null" ]; then
-            echo "Transition to $TARGET_STATUS not found"
-            exit 1
-          fi
-
-          curl -sS -u "${{ secrets.JIRA_USER_EMAIL }}:${{ secrets.JIRA_API_TOKEN }}" \
-            -H "Content-Type: application/json" \
-            -X POST \
-            --data "{\"transition\":{\"id\":\"$ID\"}}" \
-            "${{ secrets.JIRA_BASE_URL }}/rest/api/3/issue/${ISSUE}/transitions"
 
           echo "Jira transition done"
 
