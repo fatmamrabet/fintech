@@ -31,13 +31,60 @@ jobs:
           ISSUE=$(echo "$MSG" | grep -oE 'FNC-[0-9]+' | head -n 1)
 
           if [ -z "$ISSUE" ]; then
-            echo "❌ No Jira key found in commit message"
+            echo "No Jira key found in commit message"
             exit 1
           fi
 
           echo "issue=$ISSUE" >> $GITHUB_OUTPUT
 
       - name: Move ticket based on target branch
+        shell: bash
+        run: |
+          set -e
+          ISSUE="${{ steps.jira.outputs.issue }}"
+          BRANCH="${{ github.ref_name }}"
+          MSG="${{ github.event.head_commit.message }}"
+
+          echo "Issue: $ISSUE"
+          echo "Branch: $BRANCH"
+          echo "Commit message: $MSG"
+
+          if [ "$BRANCH" = "develop" ]; then
+            TARGET_STATUS="Done (In Dev)"
+          else
+            # main
+            if echo "$MSG" | grep -qi "hotfix"; then
+              TARGET_STATUS="Hotfix Deployed"
+            else
+              TARGET_STATUS="Released"
+            fi
+          fi
+
+          echo "Target status: $TARGET_STATUS"
+
+          TRANSITIONS=$(curl -sS -u "${{ secrets.JIRA_USER_EMAIL }}:${{ secrets.JIRA_API_TOKEN }}" \
+            -H "Accept: application/json" \
+            "${{ secrets.JIRA_BASE_URL }}/rest/api/3/issue/${ISSUE}/transitions")
+
+          echo "Available transitions:"
+          echo "$TRANSITIONS" | jq -r '.transitions[] | " - id=" + .id + " | to=" + .to.name'
+
+          ID=$(echo "$TRANSITIONS" | jq -r --arg t "$TARGET_STATUS" \
+            '.transitions[] | select(.to.name == $t) | .id' | head -n 1)
+
+          if [ -z "$ID" ] || [ "$ID" = "null" ]; then
+            echo "Transition to $TARGET_STATUS not found"
+            exit 1
+          fi
+
+          curl -sS -u "${{ secrets.JIRA_USER_EMAIL }}:${{ secrets.JIRA_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -X POST \
+            --data "{\"transition\":{\"id\":\"$ID\"}}" \
+            "${{ secrets.JIRA_BASE_URL }}/rest/api/3/issue/${ISSUE}/transitions" >/dev/null
+
+          echo "Jira transition done"
+
         shell: bash
         run: |
           ISSUE="${{ steps.jira.outputs.issue }}"
@@ -64,7 +111,7 @@ jobs:
             '.transitions[] | select(.to.name | contains($t)) | .id' | head -n 1)
 
           if [ -z "$ID" ] || [ "$ID" = "null" ]; then
-            echo "❌ Transition to $TARGET_STATUS not found"
+            echo "Transition to $TARGET_STATUS not found"
             exit 1
           fi
 
@@ -74,7 +121,7 @@ jobs:
             --data "{\"transition\":{\"id\":\"$ID\"}}" \
             "${{ secrets.JIRA_BASE_URL }}/rest/api/3/issue/${ISSUE}/transitions"
 
-          echo "✅ Jira transition done"
+          echo "Jira transition done"
 
       - name: Deploy
         run: echo "Deploying artifact..."
