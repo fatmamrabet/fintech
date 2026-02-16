@@ -1,9 +1,5 @@
-from app import add, health_check
+from core import format_currency
 
 
-def test_add():
-    assert add(2, 3) == 5
-
-
-def test_health_check():
-    assert health_check() == {"status": "ok"}
+def test_format_currency_two_decimals():
+    assert format_currency(10.126) == 10.13
