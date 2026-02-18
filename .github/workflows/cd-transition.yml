@@ -14,6 +14,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # (Optionnel mais recommandé) -> si tu veux éviter des surprises
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
       - name: Login to Jira
         uses: atlassian/gajira-login@v3
         env:
@@ -31,7 +35,7 @@ jobs:
           ISSUE=$(echo "$MSG" | grep -oE 'FNC-[0-9]+' | head -n 1)
 
           if [ -z "$ISSUE" ]; then
-            echo "❌ No Jira key found in commit message"
+            echo "No Jira key found in commit message"
             exit 1
           fi
 
@@ -75,42 +79,53 @@ jobs:
               "${{ secrets.JIRA_BASE_URL }}/rest/api/3/issue/${ISSUE}/transitions" >/dev/null
           }
 
-          # ✅ CHOIX DE SCENARIO (robuste)
+          # CHOIX DE SCENARIO (robuste)
           if [ "$BRANCH" = "develop" ]; then
-            # Done (In Dev) -> chez toi "Terminé"
+            # Done (In Dev)
             ID_DONE="$(find_id "termin")"
             if [ -z "$ID_DONE" ] || [ "$ID_DONE" = "null" ]; then
-              echo "✅ Nothing to do: no 'Terminé' transition available."
+              echo "Nothing to do: no 'Terminé' transition available."
               exit 0
             fi
             echo "Target: Terminé (develop)"
             do_transition "$ID_DONE"
-            echo "✅ moved to Terminé"
+            echo "moved to Terminé"
             exit 0
           fi
 
           # BRANCH = main :
-          # 1) si Hotfix Deployed existe => PRIORITÉ (ça valide la partie hotfix de l'exercice)
           ID_HOTFIX="$(find_id "hotfix")"
           if [ -n "$ID_HOTFIX" ] && [ "$ID_HOTFIX" != "null" ]; then
             echo "Target: Hotfix Deployed (main)"
             do_transition "$ID_HOTFIX"
-            echo "✅ moved to Hotfix Deployed"
+            echo "moved to Hotfix Deployed"
             exit 0
           fi
 
-          # 2) sinon Released
           ID_REL="$(find_id "released")"
           if [ -n "$ID_REL" ] && [ "$ID_REL" != "null" ]; then
             echo "Target: Released (main)"
             do_transition "$ID_REL"
-            echo "✅ moved to Released"
+            echo "moved to Released"
             exit 0
           fi
 
-          # 3) sinon on ne casse pas le workflow
-          echo "✅ Nothing to do: no Hotfix Deployed / Released transition available."
+          echo "Nothing to do: no Hotfix Deployed / Released transition available."
           exit 0
 
-      - name: Deploy
-        run: echo "Deploying artifact..."
+      # Déploiement Azure (remplace l'echo)
+      - name: Deploy to Azure Web App
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: fintech-fatma-2026-payments
+          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+          package: .
+
+      # Check rapide après déploiement (preuve)
+      - name: Smoke test /health
+        shell: bash
+        run: |
+          set -e
+          URL="https://fintech-fatma-2026-payments.azurewebsites.net/health"
+          echo "Checking $URL"
+          curl -sS "$URL"
