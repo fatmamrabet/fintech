@@ -1,4 +1,3 @@
-pytest
-flake8
 fastapi
-uvicorn
+uvicorn[standard]
+gunicorn
