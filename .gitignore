@@ -1,0 +1,6 @@
+deploy.zip
+deploy_detail.json
+docker.txt
+__pycache__/
+*.pyc
+.venv/
